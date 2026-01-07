@@ -1,0 +1,85 @@
+import pandas as pd
+import numpy as np
+import matplotlib.pyplot as plt
+import seaborn as sns
+import shap
+from sklearn.model_selection import train_test_split
+from sklearn.linear_model import LinearRegression
+from sklearn.ensemble import RandomForestRegressor, StackingRegressor
+from sklearn.svm import SVR
+from sklearn.neighbors import KNeighborsRegressor
+from sklearn.preprocessing import StandardScaler
+from sklearn.pipeline import Pipeline
+from sklearn.metrics import mean_squared_error, r2_score
+from xgboost import XGBRegressor
+
+# 1. Data Preparation
+def prepare_data(file_path):
+    df = pd.read_csv(file_path)
+    # Drop non-feature columns; ensure 'yield' is the target
+    X = df.drop(columns=["sample", "yield"], errors='ignore')
+    y = df["yield"]
+    return train_test_split(X, y, test_size=0.2, random_state=42)
+
+# 2. Model Definition
+def get_base_models():
+    return {
+        "LinearRegression": LinearRegression(),
+        "XGBoost": XGBRegressor(n_estimators=100, learning_rate=0.1, random_state=42),
+        "SVR": Pipeline([("scaler", StandardScaler()), ("svr", SVR())]),
+        "KNN": Pipeline([("scaler", StandardScaler()), ("knn", KNeighborsRegressor())]),
+        "RandomForest": RandomForestRegressor(n_estimators=100, random_state=42)
+    }
+
+# 3. Main Workflow
+if __name__ == "__main__":
+    # Load data (replace with your filename)
+    data_path = "yield_data.csv" 
+    X_train, X_test, y_train, y_test = prepare_data(data_path)
+    
+    # Evaluate individual models
+    models = get_base_models()
+    results = []
+    
+    for name, model in models.items():
+        model.fit(X_train, y_train)
+        y_pred = model.predict(X_test)
+        results.append({
+            "Model": name,
+            "RMSE": mean_squared_error(y_test, y_pred, squared=False),
+            "R2": r2_score(y_test, y_pred)
+        })
+
+    # 4. Construct Stacking Ensemble (RF as Meta-Learner)
+    estimators = [(name, models[name]) for name in ["LinearRegression", "XGBoost", "SVR", "KNN"]]
+    stacking_model = StackingRegressor(
+        estimators=estimators,
+        final_estimator=RandomForestRegressor(n_estimators=100, random_state=42)
+    )
+    stacking_model.fit(X_train, y_train)
+    
+    # 5. SHAP Global Interpretation
+    print("Generating SHAP values...")
+    explainer = shap.Explainer(stacking_model.predict, X_train)
+    shap_values = explainer(X_test)
+    
+    # Visualization: Summary Plot
+    plt.figure(figsize=(10, 6))
+    shap.plots.beeswarm(shap_values, max_display=15)
+    plt.savefig("shap_beeswarm.pdf", bbox_inches='tight')
+    
+    # 6. Feature Dependence with LOWESS (Example for Key Features)
+    key_features = ["P-ethanol", "D-starch"]
+    for feat in key_features:
+        if feat in X_train.columns:
+            plt.figure(figsize=(8, 5))
+            # Use shap.dependence_plot or custom sns plot as per your original script
+            idx = X_train.columns.get_loc(feat)
+            sns.regplot(x=X_test.iloc[:, idx], y=shap_values.values[:, idx], lowess=True, 
+                        line_kws={'color': 'red'}, scatter_kws={'alpha': 0.5})
+            plt.title(f"SHAP Dependence: {feat}")
+            plt.axhline(0, color='black', linestyle='--')
+            plt.savefig(f"shap_dep_{feat}.pdf")
+
+    # Output Final Comparison
+    print(pd.DataFrame(results).sort_values(by="RMSE"))
